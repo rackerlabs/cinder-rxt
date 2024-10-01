@@ -15,10 +15,12 @@
 import string
 import textwrap
 
+from oslo_log import log as logging
+
 from cinder.volume.drivers import lvm
 from cinder.volume.targets import tgt
-from oslo_utils import importutils
 
+LOG = logging.getLogger(__name__)
 
 RXT_VOLUME_CONF_TEMPLATE = string.Template("""
 <target %(name)s>
@@ -49,7 +51,7 @@ class RXTTgtAdm(tgt.TgtAdm):
         SCSI_SN is defined for the return and unset after.
         """
 
-        volume_conf_copy = self.VOLUME_CONF.copy()
+        volume_conf_copy = self.VOLUME_CONF
         try:
             self.VOLUME_CONF = textwrap.dedent(
                 RXT_VOLUME_CONF_TEMPLATE.safe_substitute(
@@ -78,16 +80,15 @@ class RXTLVM(lvm.LVMVolumeDriver):
             self.configuration.safe_get("volume_backend_name") or "LVM"
         )
 
-        lvm.LOG.debug(
+        LOG.debug(
             "Attempting to initialize LVM driver with the "
             "following target_driver: RXTTgtAdm"
         )
 
-        self.target_driver = importutils.import_object(
-            "cinder_rxt.rackspace.RXTLVM",
+        self.target_driver = lvm.importutils.import_object(
+            "cinder_rxt.rackspace.RXTTgtAdm",
             configuration=self.configuration,
-            executor=self._execute
-        )
+            executor=self._execute)
 
         self.protocol = (
             self.target_driver.storage_protocol or self.target_driver.protocol
