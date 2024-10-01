@@ -17,6 +17,7 @@ import textwrap
 
 from cinder.volume.drivers import lvm
 from cinder.volume.targets import tgt
+from oslo_utils import importutils
 
 
 RXT_VOLUME_CONF_TEMPLATE = string.Template("""
@@ -82,7 +83,12 @@ class RXTLVM(lvm.LVMVolumeDriver):
             "following target_driver: RXTTgtAdm"
         )
 
-        self.target_driver = RXTTgtAdm
+        self.target_driver = importutils.import_object(
+            "cinder_rxt.rackspace.RXTLVM",
+            configuration=self.configuration,
+            executor=self._execute
+        )
+
         self.protocol = (
             self.target_driver.storage_protocol or self.target_driver.protocol
         )
