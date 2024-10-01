@@ -22,6 +22,5 @@ enabled_backends = RXTlvm
 
 [RXTlvm]
 volume_driver = cinder_rxt.rackspace.RXTLVM
-volume_group = cinder-volumes
 ...
 ```

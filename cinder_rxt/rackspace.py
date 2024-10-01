@@ -12,10 +12,24 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import string
 import textwrap
 
 from cinder.volume.drivers import lvm
 from cinder.volume.targets import tgt
+
+
+RXT_VOLUME_CONF_TEMPLATE = string.Template("""
+<target %(name)s>
+    backing-store %(path)s
+    driver %(driver)s
+    %(chap_auth)s
+    %(target_flags)s
+    scsi_sn $SCSI_SN
+    scsi_id $SCSI_SN
+    write-cache %(write_cache)s
+</target>
+""")
 
 
 class RXTTgtAdm(tgt.TgtAdm):
@@ -27,34 +41,23 @@ class RXTTgtAdm(tgt.TgtAdm):
     etc.
     """
 
-    VOLUME_CONF = textwrap.dedent(
-        """
-                <target %(name)s>
-                    backing-store %(path)s
-                    driver %(driver)s
-                    %(chap_auth)s
-                    %(target_flags)s
-                    write-cache %(write_cache)s
-                    scsi_sn %(scsi_sn)s
-                    scsi_id %(scsi_sn)s
-                </target>
-                  """
-    )
+    def create_iscsi_target(self, name, tid, lun, path, chap_auth=None, **kwargs):
+        """Create a target for ISCSI and return target info.
 
-    def create_iscsi_target(
-        self, name, tid, lun, path, chap_auth=None, **kwargs
-    ):
-        volume_conf = self.VOLUME_CONF % {
-            "name": name,
-            "path": path,
-            "driver": driver,
-            "chap_auth": chap_str,
-            "target_flags": target_flags,
-            "write_cache": write_cache,
-            "scsi_sn": vol_id,
-            "scsi_id": vol_id,
-        }
-        return tid
+        This method sets and resets the volume configuration to ensure that the
+        SCSI_SN is defined for the return and unset after.
+        """
+
+        volume_conf_copy = self.VOLUME_CONF.copy()
+        try:
+            self.VOLUME_CONF = textwrap.dedent(
+                RXT_VOLUME_CONF_TEMPLATE.safe_substitute(
+                    SCSI_SN=name.split(':')[1]
+                )
+            )
+            return super().create_iscsi_target(name, tid, lun, path, chap_auth, **kwargs)
+        finally:
+            self.VOLUME_CONF = volume_conf_copy
 
 
 class RXTLVM(lvm.LVMVolumeDriver):
