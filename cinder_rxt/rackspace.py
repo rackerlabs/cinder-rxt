@@ -22,7 +22,8 @@ from cinder.volume.targets import tgt
 
 LOG = logging.getLogger(__name__)
 
-RXT_VOLUME_CONF_TEMPLATE = string.Template("""
+RXT_VOLUME_CONF_TEMPLATE = string.Template(
+    """
 <target %(name)s>
     backing-store %(path)s
     driver %(driver)s
@@ -32,7 +33,8 @@ RXT_VOLUME_CONF_TEMPLATE = string.Template("""
     scsi_id $SCSI_SN
     write-cache %(write_cache)s
 </target>
-""")
+"""
+)
 
 
 class RXTTgtAdm(tgt.TgtAdm):
@@ -44,7 +46,9 @@ class RXTTgtAdm(tgt.TgtAdm):
     etc.
     """
 
-    def create_iscsi_target(self, name, tid, lun, path, chap_auth=None, **kwargs):
+    def create_iscsi_target(
+        self, name, tid, lun, path, chap_auth=None, **kwargs
+    ):
         """Create a target for ISCSI and return target info.
 
         This method sets and resets the volume configuration to ensure that the
@@ -55,10 +59,12 @@ class RXTTgtAdm(tgt.TgtAdm):
         try:
             self.VOLUME_CONF = textwrap.dedent(
                 RXT_VOLUME_CONF_TEMPLATE.safe_substitute(
-                    SCSI_SN=name.split(':')[1]
+                    SCSI_SN=name.split(":")[1]
                 )
             )
-            return super().create_iscsi_target(name, tid, lun, path, chap_auth, **kwargs)
+            return super().create_iscsi_target(
+                name, tid, lun, path, chap_auth, **kwargs
+            )
         finally:
             self.VOLUME_CONF = volume_conf_copy
 
@@ -88,7 +94,8 @@ class RXTLVM(lvm.LVMVolumeDriver):
         self.target_driver = lvm.importutils.import_object(
             "cinder_rxt.rackspace.RXTTgtAdm",
             configuration=self.configuration,
-            executor=self._execute)
+            executor=self._execute,
+        )
 
         self.protocol = (
             self.target_driver.storage_protocol or self.target_driver.protocol
