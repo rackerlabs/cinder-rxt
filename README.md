@@ -9,7 +9,7 @@ environment.
 To install the Cinder RXT Driver, follow these steps:
 
 ``` shell
-pip install git+https://github.com/cloudnull/cinder-rxt.git
+pip install git+https://github.com/rackerlabs/cinder-rxt.git
 ```
 
 ## Configuration
