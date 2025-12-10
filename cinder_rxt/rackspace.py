@@ -293,11 +293,10 @@ class RXTLVM(lvm.LVMVolumeDriver):
         backend_gb, backend_bytes, _ = self._calculate_backend_size_gb(
             volume, margin_gb
         )
-        lv_size_gb = int(math.ceil(backend_gb))
 
         self._create_volume(
             volume["name"],
-            self._sizestr(lv_size_gb),
+            self._sizestr(backend_gb),
             self.configuration.lvm_type,
             mirror_count,
         )
@@ -305,7 +304,7 @@ class RXTLVM(lvm.LVMVolumeDriver):
         self._record_safe_size_margin(
             volume,
             requested_size_gb,
-            float(lv_size_gb),
+            backend_gb,
             backend_bytes,
             margin_type="blank",
         )
@@ -339,11 +338,10 @@ class RXTLVM(lvm.LVMVolumeDriver):
         backend_gb, backend_bytes, _ = self._calculate_backend_size_gb(
             volume, margin_gb
         )
-        lv_size_gb = int(math.ceil(backend_gb))
 
         self._create_volume(
             volume["name"],
-            self._sizestr(lv_size_gb),
+            self._sizestr(backend_gb),
             self.configuration.lvm_type,
             self.configuration.lvm_mirrors,
         )
@@ -351,7 +349,7 @@ class RXTLVM(lvm.LVMVolumeDriver):
         self._record_safe_size_margin(
             volume,
             requested_size_gb,
-            float(lv_size_gb),
+            backend_gb,
             backend_bytes,
             margin_type="snapshot",
         )
@@ -412,11 +410,10 @@ class RXTLVM(lvm.LVMVolumeDriver):
             backend_gb, backend_bytes, _ = self._calculate_backend_size_gb(
                 volume, margin_gb
             )
-            lv_size_gb = int(math.ceil(backend_gb))
 
             self._create_volume(
                 volume["name"],
-                self._sizestr(lv_size_gb),
+                self._sizestr(backend_gb),
                 self.configuration.lvm_type,
                 mirror_count,
             )
@@ -424,7 +421,7 @@ class RXTLVM(lvm.LVMVolumeDriver):
             self._record_safe_size_margin(
                 volume,
                 requested_size_gb,
-                float(lv_size_gb),
+                backend_gb,
                 backend_bytes,
                 margin_type="clone",
             )
@@ -459,15 +456,14 @@ class RXTLVM(lvm.LVMVolumeDriver):
         backend_gb, backend_bytes, _ = self._calculate_backend_size_gb(
             volume, margin_gb
         )
-        lv_size_gb = int(math.ceil(backend_gb))
 
         # If backend needs to be larger, extend LV only (DB size unchanged)
-        if lv_size_gb > volume["size"]:
-            self.extend_volume(volume, lv_size_gb)
+        if backend_gb > volume["size"]:
+            self.extend_volume(volume, backend_gb)
             self._record_safe_size_margin(
                 volume,
                 requested_size_gb,
-                float(lv_size_gb),
+                backend_gb,
                 backend_bytes,
                 margin_type="image",
             )
