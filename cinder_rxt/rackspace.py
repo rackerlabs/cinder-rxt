@@ -20,6 +20,8 @@ from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
 
+from oslo_concurrency import processutils as putils
+
 from cinder import context as cinder_context
 from cinder import db as cinder_db
 from cinder.volume.drivers import lvm
@@ -145,10 +147,30 @@ class RXTLVM(lvm.LVMVolumeDriver):
         )
 
         self._sparse_copy_volume = False
+        self._vg_extent_size_mib = None  # Cache for VG extent size
 
     # ------------------------------------------------------------------
     # Safe size margin helpers
     # ------------------------------------------------------------------
+
+    def _get_vg_extent_size_mib(self):
+        """Fetch the VG extent size in MiB.
+
+        Caches the result since extent size doesn't change for a VG.
+        """
+        if self._vg_extent_size_mib is not None:
+            return self._vg_extent_size_mib
+
+        cmd = ['env', 'LC_ALL=C', 'vgs', '--noheadings', '--unit=m',
+               '-o', 'vg_extent_size', '--nosuffix', self.vg.vg_name]
+        try:
+            (out, _err) = putils.execute(*cmd, run_as_root=True,
+                                         root_helper=self.vg._root_helper)
+            self._vg_extent_size_mib = float(out.strip())
+        except putils.ProcessExecutionError:
+            LOG.warning("Failed to query VG extent size, using default 4 MiB")
+            self._vg_extent_size_mib = 4.0  # LVM default extent size
+        return self._vg_extent_size_mib
 
     def _calculate_backend_size_gb(self, volume, margin_gb):
         """Compute LV size (GiB) including configured safety margin.
@@ -164,7 +186,7 @@ class RXTLVM(lvm.LVMVolumeDriver):
         base_bytes = int(base_gb * units.Gi)
 
         # VG extent size (MiB -> bytes)
-        extent_bytes = int(self.vg.vg_extent_size * units.Mi)
+        extent_bytes = int(self._get_vg_extent_size_mib() * units.Mi)
 
         # Normalise and clamp the configured margin
         if margin_gb is None:
