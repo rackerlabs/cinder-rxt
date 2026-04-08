@@ -8,10 +8,18 @@ from cinder_rxt.rackspace import RXTLVM, _LUKS_HEADER_BYTES
 
 
 class FakeVG:
+    LVM_CMD_PREFIX = ["env", "LC_ALL=C"]
+
     def __init__(self, extent_size_mib=4):
-        self.vg_extent_size = extent_size_mib
+        self._extent_size_mib = extent_size_mib
         self.vg_name = "fake-vg"
         self._root_helper = "sudo cinder-rootwrap /etc/cinder/rootwrap.conf"
+
+    def _execute(self, *args, **kwargs):
+        """Simulate vgs command for extent size queries."""
+        if "vg_extent_size" in args:
+            return ("  %s\n" % self._extent_size_mib, "")
+        return ("", "")
 
 
 class TestCopyImageToEncryptedVolume(unittest.TestCase):
@@ -53,11 +61,10 @@ class TestCopyImageToEncryptedVolume(unittest.TestCase):
 
         mock_execute.assert_called_once()
         args, kwargs = mock_execute.call_args
-        self.assertEqual(
-            ("env", "LC_ALL=C", "lvresize", "-f", "-L", "10g",
-             "fake-vg/vol-1"),
-            args,
+        expected = tuple(FakeVG.LVM_CMD_PREFIX) + (
+            "lvresize", "-f", "-L", "10g", "fake-vg/vol-1",
         )
+        self.assertEqual(expected, args)
         self.assertTrue(kwargs["run_as_root"])
 
     @mock.patch("cinder_rxt.rackspace.putils.execute")
@@ -94,9 +101,10 @@ class TestCopyImageToEncryptedVolume(unittest.TestCase):
         # LV should be shrunk back after the copy
         mock_lvresize_execute.assert_called_once()
         args = mock_lvresize_execute.call_args[0]
-        self.assertEqual("lvresize", args[2])
+        prefix_len = len(FakeVG.LVM_CMD_PREFIX)
+        self.assertEqual("lvresize", args[prefix_len])
         # Target size should be the original volume size
-        self.assertEqual("40g", args[5])
+        self.assertEqual("40g", args[prefix_len + 3])
 
     @mock.patch("cinder_rxt.rackspace.putils.execute")
     def test_shrinks_lv_even_when_image_copy_fails(

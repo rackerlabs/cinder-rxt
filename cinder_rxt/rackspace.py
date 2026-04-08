@@ -132,8 +132,13 @@ class RXTLVM(lvm.LVMVolumeDriver):
 
     def _get_extent_size_bytes(self):
         """Return the VG physical extent size in bytes."""
-        # vg_extent_size is in MiB (float) on the brick LVM object
-        return int(float(self.vg.vg_extent_size) * units.Mi)
+        cmd = self.vg.LVM_CMD_PREFIX + [
+            "vgs", "--noheadings", "--nosuffix", "--units", "m",
+            "-o", "vg_extent_size", self.vg.vg_name,
+        ]
+        out, _err = self.vg._execute(
+            *cmd, root_helper=self.vg._root_helper, run_as_root=True)
+        return int(float(out.strip()) * units.Mi)
 
     def _lvresize(self, volume, size_str):
         """Resize an LV using lvresize (supports both grow and shrink).
@@ -142,8 +147,9 @@ class RXTLVM(lvm.LVMVolumeDriver):
         ``extend_volume`` (lvextend) which cannot shrink.
         """
         lv_path = "%s/%s" % (self.vg.vg_name, volume["name"])
-        cmd = ["env", "LC_ALL=C", "lvresize", "-f",
-               "-L", size_str, lv_path]
+        cmd = self.vg.LVM_CMD_PREFIX + [
+            "lvresize", "-f", "-L", size_str, lv_path,
+        ]
         putils.execute(*cmd, run_as_root=True,
                        root_helper=self.vg._root_helper)
 
