@@ -150,30 +150,14 @@ class RXTLVM(lvm.LVMVolumeDriver):
         This is needed because os-brick's LVM class only exposes
         ``extend_volume`` (lvextend) which cannot shrink.
 
-        The LV is deactivated before shrinking because dm-crypt or
-        iSCSI holders may not have been fully released yet.  After
-        the resize the LV is reactivated.
-
-        Commands use bare invocations (no env prefix) matched by
-        rootwrap ``CommandFilter`` entries.
+        If the resize fails (e.g. because dm-crypt holders have not
+        been fully released), the caller is expected to catch
+        ``ProcessExecutionError`` and leave the LV at its current size.
         """
         lv_path = "%s/%s" % (self.vg.vg_name, volume["name"])
-        _exec = putils.execute
-        rh = self.vg._root_helper
-
-        _exec("lvchange", "-an", lv_path,
-              run_as_root=True, root_helper=rh)
-        try:
-            _exec("lvresize", "-f", "-L", size_str, lv_path,
-                  run_as_root=True, root_helper=rh)
-        finally:
-            try:
-                _exec("lvchange", "-ay", "-K", lv_path,
-                      run_as_root=True, root_helper=rh)
-            except putils.ProcessExecutionError:
-                LOG.exception(
-                    "Failed to reactivate LV %s after resize attempt. "
-                    "Manual intervention may be required.", lv_path)
+        putils.execute("lvresize", "-f", "-L", size_str, lv_path,
+                       run_as_root=True,
+                       root_helper=self.vg._root_helper)
 
     def copy_image_to_encrypted_volume(
         self, context, volume, image_service, image_id,
