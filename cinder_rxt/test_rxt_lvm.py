@@ -53,19 +53,26 @@ class TestCopyImageToEncryptedVolume(unittest.TestCase):
         self.assertEqual(8 * units.Mi, drv._get_extent_size_bytes())
 
     @mock.patch("cinder_rxt.rackspace.putils.execute")
-    def test_lvresize_calls_correct_command(self, mock_execute):
+    def test_lvresize_calls_correct_commands(self, mock_execute):
         drv = self._make_driver()
         volume = {"id": "v1", "name": "vol-1", "size": 10}
 
         drv._lvresize(volume, "10g")
 
-        mock_execute.assert_called_once()
-        args, kwargs = mock_execute.call_args
-        expected = tuple(FakeVG.LVM_CMD_PREFIX) + (
-            "lvresize", "-f", "-L", "10g", "fake-vg/vol-1",
-        )
-        self.assertEqual(expected, args)
-        self.assertTrue(kwargs["run_as_root"])
+        self.assertEqual(mock_execute.call_count, 3)
+        calls = mock_execute.call_args_list
+
+        # 1. deactivate
+        self.assertEqual(
+            calls[0][0], ("lvchange", "-an", "fake-vg/vol-1"))
+        # 2. resize
+        self.assertEqual(
+            calls[1][0],
+            ("lvresize", "-f", "-L", "10g", "fake-vg/vol-1"))
+        # 3. reactivate
+        self.assertEqual(
+            calls[2][0],
+            ("lvchange", "-ay", "-K", "fake-vg/vol-1"))
 
     @mock.patch("cinder_rxt.rackspace.putils.execute")
     def test_extends_lv_before_image_copy_and_shrinks_after(
@@ -98,13 +105,12 @@ class TestCopyImageToEncryptedVolume(unittest.TestCase):
             encrypted=True, disable_sparse=False,
         )
 
-        # LV should be shrunk back after the copy
-        mock_lvresize_execute.assert_called_once()
-        args = mock_lvresize_execute.call_args[0]
-        prefix_len = len(FakeVG.LVM_CMD_PREFIX)
-        self.assertEqual("lvresize", args[prefix_len])
+        # LV should be shrunk back after the copy (deactivate, resize, activate)
+        self.assertEqual(mock_lvresize_execute.call_count, 3)
+        resize_args = mock_lvresize_execute.call_args_list[1][0]
+        self.assertEqual("lvresize", resize_args[0])
         # Target size should be the original volume size
-        self.assertEqual("40g", args[prefix_len + 3])
+        self.assertEqual("40g", resize_args[3])
 
     @mock.patch("cinder_rxt.rackspace.putils.execute")
     def test_shrinks_lv_even_when_image_copy_fails(
@@ -127,14 +133,18 @@ class TestCopyImageToEncryptedVolume(unittest.TestCase):
             )
 
         # LV should still be shrunk back despite the failure
-        mock_lvresize_execute.assert_called_once()
+        # (deactivate, resize, activate = 3 calls)
+        self.assertEqual(mock_lvresize_execute.call_count, 3)
 
     @mock.patch("cinder_rxt.rackspace.putils.execute")
-    def test_lvresize_failure_is_non_fatal(self, mock_lvresize_execute):
+    def test_lvresize_failure_is_non_fatal(self, mock_execute):
         """If lvresize fails after image copy, log warning but don't raise."""
-        mock_lvresize_execute.side_effect = putils.ProcessExecutionError(
-            exit_code=1, stderr="lvresize failed"
-        )
+        def _selective_fail(*args, **kwargs):
+            if "lvresize" in args:
+                raise putils.ProcessExecutionError(
+                    exit_code=1, stderr="lvresize failed")
+
+        mock_execute.side_effect = _selective_fail
         drv = self._make_driver()
         volume = {"id": "v3", "name": "vol-shrink-fail", "size": 10}
 
