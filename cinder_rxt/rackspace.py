@@ -131,7 +131,11 @@ class RXTLVM(lvm.LVMVolumeDriver):
     # ------------------------------------------------------------------
 
     def _get_extent_size_bytes(self):
-        """Return the VG physical extent size in bytes."""
+        """Return the VG physical extent size in bytes.
+
+        Uses the same LVM_CMD_PREFIX as the brick LVM class to ensure
+        rootwrap filter compatibility.
+        """
         cmd = self.vg.LVM_CMD_PREFIX + [
             "vgs", "--noheadings", "--nosuffix", "--units", "m",
             "-o", "vg_extent_size", self.vg.vg_name,
@@ -145,13 +149,31 @@ class RXTLVM(lvm.LVMVolumeDriver):
 
         This is needed because os-brick's LVM class only exposes
         ``extend_volume`` (lvextend) which cannot shrink.
+
+        The LV is deactivated before shrinking because dm-crypt or
+        iSCSI holders may not have been fully released yet.  After
+        the resize the LV is reactivated.
+
+        Commands use bare invocations (no env prefix) matched by
+        rootwrap ``CommandFilter`` entries.
         """
         lv_path = "%s/%s" % (self.vg.vg_name, volume["name"])
-        cmd = self.vg.LVM_CMD_PREFIX + [
-            "lvresize", "-f", "-L", size_str, lv_path,
-        ]
-        putils.execute(*cmd, run_as_root=True,
-                       root_helper=self.vg._root_helper)
+        _exec = putils.execute
+        rh = self.vg._root_helper
+
+        _exec("lvchange", "-an", lv_path,
+              run_as_root=True, root_helper=rh)
+        try:
+            _exec("lvresize", "-f", "-L", size_str, lv_path,
+                  run_as_root=True, root_helper=rh)
+        finally:
+            try:
+                _exec("lvchange", "-ay", "-K", lv_path,
+                      run_as_root=True, root_helper=rh)
+            except putils.ProcessExecutionError:
+                LOG.exception(
+                    "Failed to reactivate LV %s after resize attempt. "
+                    "Manual intervention may be required.", lv_path)
 
     def copy_image_to_encrypted_volume(
         self, context, volume, image_service, image_id,
@@ -203,9 +225,11 @@ class RXTLVM(lvm.LVMVolumeDriver):
                     "encrypted image copy.",
                     {"vol": volume["id"], "size": original_str},
                 )
-            except putils.ProcessExecutionError:
+            except putils.ProcessExecutionError as e:
                 LOG.warning(
                     "Failed to shrink LV for volume %(vol)s back to "
-                    "%(size)s. The LV will remain at the extended size.",
-                    {"vol": volume["id"], "size": original_str},
+                    "%(size)s. The LV will remain at the extended size. "
+                    "stderr=%(err)s",
+                    {"vol": volume["id"], "size": original_str,
+                     "err": e.stderr},
                 )
