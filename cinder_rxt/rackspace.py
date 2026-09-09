@@ -16,20 +16,22 @@ import math
 import string
 import textwrap
 
-from oslo_concurrency import processutils as putils
 from oslo_log import log as logging
 from oslo_utils import units
 
+from cinder import exception
 from cinder.volume.drivers import lvm
 from cinder.volume.targets import tgt
 
 LOG = logging.getLogger(__name__)
 
-# LUKS1 header is 2 MiB; LUKS2 header is 16 MiB.  We use 16 MiB to
-# cover both formats.  This is the minimum extra space the LV needs so
-# that the decrypted dm-crypt device is at least as large as the
-# requested volume size.
-_LUKS_HEADER_BYTES = 16 * units.Mi
+# LUKS headers live in-band at the front of the block device, so the
+# decrypted dm-crypt payload presented to the guest is smaller than the
+# volume by the header size.  os-brick formats with an explicit
+# ``--type``: provider ``luks`` -> LUKS1 (payload offset 4096 sectors),
+# provider ``luks2`` -> LUKS2 (default 16 MiB metadata + keyslot area).
+_LUKS1_HEADER_BYTES = 2 * units.Mi
+_LUKS2_HEADER_BYTES = 16 * units.Mi
 
 RXT_VOLUME_CONF_TEMPLATE = string.Template(
     """
@@ -82,21 +84,24 @@ class RXTLVM(lvm.LVMVolumeDriver):
     """Rackspace LVM Driver.
 
     This class is used to create a new Cinder driver that gives us control of
-    the TGT helper and to work around a sizing issue when writing images to
-    encrypted LVM volumes.
+    the TGT helper.
 
-    When cinder writes an image to an encrypted volume the LUKS header
-    consumes space on the LV, leaving the decrypted dm-crypt device
-    smaller than the requested volume size.  For example a 40 GiB LV
-    yields only ~39.998 GiB of usable space after LUKS1 formatting
-    (or ~39.984 GiB with LUKS2).  ``qemu-img convert`` then fails with
-    "Cannot grow device files" because the image's virtual size exceeds
-    the decrypted device.
+    Volume sizing is deliberately identical to the upstream LVM driver.
+    Upstream carves the LUKS header out of the requested size, so an
+    encrypted volume's usable capacity is the nominal size minus the
+    header (2 MiB for LUKS1).  This is documented and accepted upstream
+    (spec "Sizing encrypted volumes", Xena) and every copy path in the
+    manager (migrate, retype, backup, clone) assumes it.  Padding the LV
+    to compensate makes the guest see *more* than nominal; growpart then
+    consumes the excess and any later copy into an exact-size backend
+    (e.g. retype to an unencrypted NetApp type) truncates the partition
+    table.  See OSPC-2358.
 
-    The fix is minimal: before writing the image we extend the LV by
-    enough VG physical extents to cover the LUKS header, then shrink it
-    back after the write completes so that backup tools that capture the
-    raw block device see the correct size.
+    The one behavioural change is a fail-fast check when writing an image
+    to an encrypted volume: if the image's virtual size cannot fit in the
+    usable payload, raise ``ImageTooBig`` with the size the user
+    needs to request, instead of downloading the image and failing later
+    in ``qemu-img convert`` with "Cannot grow device files".
     """
 
     def __init__(self, vg_obj=None, *args, **kwargs):
@@ -127,37 +132,71 @@ class RXTLVM(lvm.LVMVolumeDriver):
         self._sparse_copy_volume = False
 
     # ------------------------------------------------------------------
-    # LUKS header compensation for encrypted image-to-volume copies
+    # Fail-fast sizing check for encrypted image-to-volume copies
     # ------------------------------------------------------------------
 
-    def _get_extent_size_bytes(self):
-        """Return the VG physical extent size in bytes.
+    @staticmethod
+    def _luks_header_bytes(provider):
+        """Return the LUKS header size for an encryption provider string.
 
-        Uses the same LVM_CMD_PREFIX as the brick LVM class to ensure
-        rootwrap filter compatibility.
+        Provider may be the short format name (``luks``, ``luks2``) or a
+        legacy class path (``os_brick.encryptors.luks.Luks2Encryptor``).
+        Anything not recognisably LUKS2 is treated as LUKS1, the smaller
+        header, so the check never rejects an image that would fit.
         """
-        cmd = self.vg.LVM_CMD_PREFIX + [
-            "vgs", "--noheadings", "--nosuffix", "--units", "m",
-            "-o", "vg_extent_size", self.vg.vg_name,
-        ]
-        out, _err = self.vg._execute(
-            *cmd, root_helper=self.vg._root_helper, run_as_root=True)
-        return int(float(out.strip()) * units.Mi)
+        if provider and "luks2" in provider.lower():
+            return _LUKS2_HEADER_BYTES
+        return _LUKS1_HEADER_BYTES
 
-    def _lvresize(self, volume, size_str):
-        """Resize an LV using lvresize (supports both grow and shrink).
+    def _check_image_fits_encrypted_volume(
+        self, context, volume, image_service, image_id
+    ):
+        """Raise ImageTooBig if the image cannot fit the LUKS payload.
 
-        This is needed because os-brick's LVM class only exposes
-        ``extend_volume`` (lvextend) which cannot shrink.
-
-        If the resize fails (e.g. because dm-crypt holders have not
-        been fully released), the caller is expected to catch
-        ``ProcessExecutionError`` and leave the LV at its current size.
+        Silently returns if the image's virtual size is unknown; upstream
+        behaviour then applies.
         """
-        lv_path = "%s/%s" % (self.vg.vg_name, volume["name"])
-        putils.execute("lvresize", "-f", "-L", size_str, lv_path,
-                       run_as_root=True,
-                       root_helper=self.vg._root_helper)
+        try:
+            image_meta = image_service.show(context, image_id)
+            virtual_size = image_meta.get("virtual_size")
+        except Exception:
+            LOG.debug("Unable to read virtual_size for image %s; skipping "
+                      "encrypted capacity pre-check.", image_id,
+                      exc_info=True)
+            return
+        if not virtual_size:
+            return
+        virtual_size = int(virtual_size)
+
+        try:
+            encryption = self.db.volume_encryption_metadata_get(
+                context, volume.id)
+            provider = (encryption or {}).get("provider")
+        except Exception:
+            LOG.debug("Unable to read encryption metadata for volume %s; "
+                      "assuming LUKS1 header.", volume.id, exc_info=True)
+            provider = None
+        header = self._luks_header_bytes(provider)
+
+        nominal = int(volume["size"]) * units.Gi
+        usable = nominal - header
+        if virtual_size <= usable:
+            return
+
+        min_gib = int(math.ceil((virtual_size + header) / float(units.Gi)))
+        reason = (
+            "image virtual size %(vsize)d bytes exceeds the usable capacity "
+            "of encrypted volume %(vol)s (%(nominal)d GiB requested minus "
+            "%(header)d MiB LUKS header = %(usable)d bytes). Encrypted "
+            "volumes lose the LUKS header from the requested size; request "
+            "a volume of at least %(min_gib)d GiB for this image."
+            % {"vsize": virtual_size, "vol": volume["id"],
+               "nominal": int(volume["size"]), "header": header // units.Mi,
+               "usable": usable, "min_gib": min_gib}
+        )
+        LOG.error("Image %(image)s does not fit encrypted volume: %(reason)s",
+                  {"image": image_id, "reason": reason})
+        raise exception.ImageTooBig(image_id=image_id, reason=reason)
 
     def copy_image_to_encrypted_volume(
         self, context, volume, image_service, image_id,
@@ -165,55 +204,13 @@ class RXTLVM(lvm.LVMVolumeDriver):
     ):
         """Fetch image and write to an encrypted volume.
 
-        Before writing, temporarily extend the LV by enough extents to
-        cover the LUKS header so it does not eat into the usable space.
-        After the write succeeds, shrink the LV back to the original
-        size to prevent backup tools from capturing the oversized block
-        device.
+        Identical to upstream except for the pre-check.  The LV is never
+        resized around the copy: the LUKS payload occupies everything
+        after the header, so shrinking the LV truncates the image.
         """
-        extent_bytes = self._get_extent_size_bytes()
-        # LUKS2 header is 16 MiB and the default PE is 4 MiB, so we
-        # may need up to 4 extents.  Calculate the minimum number of
-        # extents to cover the LUKS header.
-        extra_extents = int(math.ceil(_LUKS_HEADER_BYTES / extent_bytes))
-        extra_bytes = extra_extents * extent_bytes
-
-        original_bytes = int(volume["size"]) * units.Gi
-        extended_bytes = original_bytes + extra_bytes
-        original_str = self._sizestr(volume["size"])
-
-        LOG.info(
-            "Extending LV for encrypted volume %(vol)s by %(extra)d bytes "
-            "(%(extents)d extents) to accommodate LUKS header before "
-            "image copy.",
-            {"vol": volume["id"], "extra": extra_bytes,
-             "extents": extra_extents},
+        self._check_image_fits_encrypted_volume(
+            context, volume, image_service, image_id)
+        super(RXTLVM, self).copy_image_to_encrypted_volume(
+            context, volume, image_service, image_id,
+            disable_sparse=disable_sparse,
         )
-
-        self.extend_volume(volume, extended_bytes / float(units.Gi))
-
-        try:
-            # Delegate to the base driver which handles attaching,
-            # LUKS encryptor setup, fetch_to_raw, and detaching.
-            self._copy_image_data_to_volume(
-                context, volume, image_service, image_id,
-                encrypted=True, disable_sparse=disable_sparse,
-            )
-        finally:
-            # Always attempt to shrink back, even on failure, so we
-            # don't leave an oversized LV.
-            try:
-                self._lvresize(volume, original_str)
-                LOG.info(
-                    "LV for volume %(vol)s shrunk back to %(size)s after "
-                    "encrypted image copy.",
-                    {"vol": volume["id"], "size": original_str},
-                )
-            except putils.ProcessExecutionError as e:
-                LOG.warning(
-                    "Failed to shrink LV for volume %(vol)s back to "
-                    "%(size)s. The LV will remain at the extended size. "
-                    "stderr=%(err)s",
-                    {"vol": volume["id"], "size": original_str,
-                     "err": e.stderr},
-                )
